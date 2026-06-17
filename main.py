@@ -69,17 +69,63 @@ def type_text(text: str):
     subprocess.run([WTYPE, "-k", "Return"], env=env)
 
 
+VISUALIZER = Path(__file__).parent / "visualizer.py"
+
+
 class VoiceApp:
     def __init__(self, lang: str = "es"):
         self.lang = lang
         self.recorder = VoiceRecorder()
         self._recording = False
         self._busy = threading.Event()
+        self._visualizer: subprocess.Popen | None = None
+
+    def _send_amplitude(self, amp: float):
+        proc = self._visualizer
+        if proc and proc.poll() is None:
+            try:
+                proc.stdin.write(f"{amp:.4f}\n")
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                self._visualizer = None
+
+    def _launch_visualizer(self):
+        # Captura el fondo ANTES de que aparezca el orbe
+        bg_path = "/tmp/orb_bg.png"
+        try:
+            subprocess.run(["grim", bg_path], timeout=2,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            bg_path = None
+
+        try:
+            cmd = ["/usr/bin/python3", str(VISUALIZER)]
+            if bg_path:
+                cmd += ["--bg", bg_path]
+            self._visualizer = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as e:
+            print(f"[visualizer] {e}", flush=True)
+            self._visualizer = None
+
+    def _kill_visualizer(self):
+        proc = self._visualizer
+        self._visualizer = None
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
     def start_recording(self):
         if self._busy.is_set() or self._recording:
             return
         self._recording = True
+        self._launch_visualizer()
         tts.beep(freq=880, duration=0.12)
         notify("🎙 Grabando…", "Suelta Super+Space para enviar")
 
@@ -87,6 +133,7 @@ class VoiceApp:
         if not self._recording:
             return
         self._recording = False
+        self._kill_visualizer()
         tts.beep(freq=440, duration=0.10)
         audio = self.recorder.stop()
 
@@ -122,7 +169,7 @@ class VoiceApp:
         print("Cargando modelo Whisper…", flush=True)
 
         # Inicia el recorder aquí para que esté listo
-        self.recorder = VoiceRecorder()
+        self.recorder = VoiceRecorder(amplitude_cb=self._send_amplitude)
 
         stt.load_model(model_size)
         print("Listo. Super+Space para hablar.", flush=True)
